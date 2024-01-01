@@ -1,0 +1,88 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
+from joblib import parallel_backend
+
+# Load the dataset
+file_path = r'/content/BTM_full.csv'  # Replace with your dataset path
+
+data = pd.read_csv(file_path, low_memory=False)
+
+# Identify and handle mixed data types
+data = data.apply(pd.to_numeric, errors='coerce')
+
+# Outlier detection and removal using IQR
+Q1 = np.percentile(data['PM2.5'], 25)
+Q3 = np.percentile(data['PM2.5'], 75)
+IQR = Q3 - Q1
+
+lower_bound = Q1 - 1.5 * IQR
+upper_bound = Q3 + 1.5 * IQR
+
+outliers = (data['PM2.5'] < lower_bound) | (data['PM2.5'] > upper_bound)
+data = data[~outliers]
+
+# Separate features and target variable
+X = data.drop("PM2.5", axis=1)
+y = data['PM2.5']
+
+# Impute missing values after handling outliers
+imputer = SimpleImputer(strategy='mean')  # Use appropriate strategy
+X = imputer.fit_transform(X)
+y = imputer.fit_transform(y.values.reshape(-1, 1)).ravel()
+
+# Split the data for training and testing after handling outliers and imputation
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.05, random_state=42)
+
+# Scaling features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Adding Polynomial Features
+poly = PolynomialFeatures(degree=2)
+X_train_poly = poly.fit_transform(X_train_scaled)
+X_test_poly = poly.transform(X_test_scaled)
+
+# Define parameter grid for SVR
+param_dist_svr = {
+    'C': [1, 5, 10, 50],
+    'gamma': ['scale', 'auto', 0.1, 0.5],
+    'epsilon': [0.1, 0.2, 0.5]
+}
+
+# Train the SVR model with Randomized Search and parallel processing
+svr = SVR()
+with parallel_backend('multiprocessing'):
+    random_search_svr = RandomizedSearchCV(svr, param_dist_svr, n_iter=3, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+    random_search_svr.fit(X_train_poly, y_train)
+
+# Get the best SVR parameters and retrain the model
+best_svr = random_search_svr.best_estimator_
+best_svr.fit(X_train_poly, y_train)
+
+# Predictions using SVR
+y_pred_svr = best_svr.predict(X_test_poly)
+
+# Train Random Forest Regressor
+rf = RandomForestRegressor(n_estimators=50, random_state=42)
+rf.fit(X_train_scaled, y_train)
+y_pred_rf = rf.predict(X_test_scaled)
+
+# Ensemble predictions using simple averaging
+ensemble_pred = (y_pred_svr + y_pred_rf) / 2
+
+# Evaluate ensemble predictions
+ensemble_mse = mean_squared_error(y_test, ensemble_pred)
+ensemble_rmse = np.sqrt(ensemble_mse)
+ensemble_r_squared = r2_score(y_test, ensemble_pred)
+
+print("Ensemble Metrics:")
+print(f"Mean Squared Error (MSE): {ensemble_mse}")
+print(f"Root Mean Squared Error (RMSE): {ensemble_rmse}")
+print(f"R-squared Error: {ensemble_r_squared}")
